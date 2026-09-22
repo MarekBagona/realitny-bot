@@ -495,8 +495,10 @@ def send_lead_notification(answers: dict, low: int, high: int) -> None:
     """Pošle email na NOTIFY_EMAIL_TO o novom leade. Ak nie je nastavené
     SMTP prihlásenie, len sa to potichu preskočí (appka aj tak ďalej funguje,
     lead ostáva uložený v leads.csv)."""
+    print("[info] send_lead_notification spustené...", flush=True)
+
     if not SMTP_USER or not SMTP_PASSWORD:
-        print("[upozornenie] SMTP_USER/SMTP_PASSWORD nie sú nastavené - email notifikácia sa neposlala.")
+        print("[upozornenie] SMTP_USER/SMTP_PASSWORD nie sú nastavené - email notifikácia sa neposlala.", flush=True)
         return
 
     body = (
@@ -523,8 +525,9 @@ def send_lead_notification(answers: dict, low: int, high: int) -> None:
             server.starttls()
             server.login(SMTP_USER, SMTP_PASSWORD)
             server.sendmail(SMTP_USER, [NOTIFY_EMAIL_TO], msg.as_string())
+        print("[info] Email s notifikáciou o leade bol úspešne odoslaný.", flush=True)
     except Exception as e:
-        print(f"[chyba] Nepodarilo sa odoslať emailovú notifikáciu: {e}")
+        print(f"[chyba] Nepodarilo sa odoslať emailovú notifikáciu: {e}", flush=True)
 
 
 # ---------------------------------------------------------------------------
