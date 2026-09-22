@@ -543,6 +543,21 @@ WIDGET_JS = """
   var scriptTag = document.currentScript;
   var origin = new URL(scriptTag.src).origin;
 
+  var style = document.createElement('style');
+  style.textContent =
+    '#realitny-bot-iframe {' +
+    '  position: fixed; bottom: 90px; right: 20px; width: 340px; height: 480px;' +
+    '  border: none; border-radius: 14px; box-shadow: 0 8px 30px rgba(0,0,0,0.35);' +
+    '  z-index: 999999; max-width: 90vw; max-height: 70vh; display: none;' +
+    '}' +
+    '@media (max-width: 480px) {' +
+    '  #realitny-bot-iframe {' +
+    '    top: 0; left: 0; right: 0; bottom: 0; width: 100vw; height: 100vh;' +
+    '    max-width: 100vw; max-height: 100vh; border-radius: 0;' +
+    '  }' +
+    '}';
+  document.head.appendChild(style);
+
   var bubble = document.createElement('div');
   bubble.innerHTML = '🏠';
   bubble.style.cssText = 'position:fixed;bottom:20px;right:20px;width:60px;height:60px;'
@@ -559,20 +574,37 @@ WIDGET_JS = """
   setTimeout(function() { teaser.style.display = 'none'; }, 12000);
 
   var iframe = null;
+  var isOpen = false;
 
   function openChat() {
     teaser.style.display = 'none';
-    if (iframe) { iframe.style.display = 'block'; return; }
-    iframe = document.createElement('iframe');
-    iframe.src = origin + '/chat';
-    iframe.style.cssText = 'position:fixed;bottom:90px;right:20px;width:340px;height:480px;'
-      + 'border:none;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,0.35);z-index:999999;'
-      + 'max-width:90vw;max-height:70vh;';
-    document.body.appendChild(iframe);
+    if (!iframe) {
+      iframe = document.createElement('iframe');
+      iframe.id = 'realitny-bot-iframe';
+      iframe.src = origin + '/chat';
+      document.body.appendChild(iframe);
+    }
+    iframe.style.display = 'block';
+    isOpen = true;
+    bubble.innerHTML = '✕';
   }
 
-  bubble.onclick = openChat;
+  function closeChat() {
+    if (iframe) { iframe.style.display = 'none'; }
+    isOpen = false;
+    bubble.innerHTML = '🏠';
+  }
+
+  bubble.onclick = function() {
+    if (isOpen) { closeChat(); } else { openChat(); }
+  };
   teaser.onclick = openChat;
+
+  window.addEventListener('message', function(event) {
+    if (event.data && event.data.type === 'realitny-bot-close') {
+      closeChat();
+    }
+  });
 })();
 """
 
@@ -592,7 +624,10 @@ CHAT_PAGE = """
   body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
     background:#171a21; color:#e8e9ec; height:100vh; display:flex; flex-direction:column; }
   .header { background:#1d2029; padding:12px 14px; font-weight:600; font-size:0.95rem;
-    border-bottom:1px solid #2a2e38; }
+    border-bottom:1px solid #2a2e38; display:flex; align-items:center; justify-content:space-between; }
+  .close-btn { background:none; border:none; color:#9aa0ab; font-size:1.1rem; cursor:pointer;
+    line-height:1; padding:4px 6px; border-radius:6px; }
+  .close-btn:hover { background:#2a2e38; color:#e8e9ec; }
   .messages { flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
   .msg { max-width:85%; padding:9px 12px; border-radius:12px; font-size:0.85rem; line-height:1.4;
     white-space:pre-wrap; }
@@ -629,7 +664,10 @@ CHAT_PAGE = """
 </style>
 </head>
 <body>
-  <div class="header">🏠 Odhad ceny nehnuteľnosti</div>
+  <div class="header">
+    <span>🏠 Odhad ceny nehnuteľnosti</span>
+    <button class="close-btn" onclick="closeWidget()" aria-label="Zavrieť">✕</button>
+  </div>
   <div class="messages" id="messages"></div>
   <div class="options" id="options"></div>
   <div class="contact-hint" id="contactHint" style="display:none;">Napíšte email (napr. jan@priklad.sk) alebo telefón (napr. 0911 123 456)</div>
@@ -640,6 +678,12 @@ CHAT_PAGE = """
 
 <script>
 let sessionId = null;
+
+function closeWidget() {
+  try {
+    window.parent.postMessage({type: 'realitny-bot-close'}, '*');
+  } catch (e) {}
+}
 
 function addMsg(text, who, extraClass) {
   const el = document.createElement('div');
