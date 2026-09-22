@@ -238,7 +238,7 @@ def generate_summary(answers: dict, low: int, high: int) -> str:
 
     try:
         import anthropic
-        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"), timeout=15.0, max_retries=1)
         prompt = (
             "Si realitný asistent. Na základe týchto údajov o nehnuteľnosti napíš "
             "krátke (3-4 vety), priateľské zhrnutie cenového odhadu v slovenčine. "
@@ -452,7 +452,14 @@ def save_lead(answers: dict, low, high) -> None:
             answers.get("balcony", ""), low, high, answers.get(CONTACT_STEP_KEY, ""),
         ])
 
-    send_lead_notification(answers, low, high)
+    send_lead_notification_async(answers, low, high)
+
+
+def send_lead_notification_async(answers: dict, low: int, high: int) -> None:
+    """Spustí odoslanie emailu na pozadí (v samostatnom vlákne), aby appka
+    hneď odpovedala klientovi v chate a nečakala na pomalé SMTP spojenie."""
+    import threading
+    threading.Thread(target=send_lead_notification, args=(answers, low, high), daemon=True).start()
 
 
 def send_lead_notification(answers: dict, low: int, high: int) -> None:
@@ -483,7 +490,7 @@ def send_lead_notification(answers: dict, low: int, high: int) -> None:
     msg["To"] = NOTIFY_EMAIL_TO
 
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
             server.starttls()
             server.login(SMTP_USER, SMTP_PASSWORD)
             server.sendmail(SMTP_USER, [NOTIFY_EMAIL_TO], msg.as_string())
