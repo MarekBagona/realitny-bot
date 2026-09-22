@@ -106,6 +106,9 @@ TYPE_MULTIPLIER = {"byt": 1.0, "dom": 0.9, "pozemok": 0.15}  # pozemok = hrubý 
 
 BALCONY_MULTIPLIER = {"áno": 1.03, "ano": 1.03, "nie": 1.00}
 GROUND_FLOOR_PENALTY = 0.95  # prízemie je zväčša mierne menej žiadané
+NO_ELEVATOR_HIGH_FLOOR_PENALTY = 0.92  # vyššie poschodie bez výťahu je citeľne menej žiadané
+HAS_ELEVATOR_BONUS = 1.02  # výťah je vždy mierna výhoda, aj na nižších poschodiach
+HIGH_FLOOR_THRESHOLD = 4  # od tohto poschodia (vrátane) sa chýbajúci výťah citeľne prejaví na cene
 
 HOUSE_TYPE_MULTIPLIER = {
     "bungalov (prízemný)": 1.03, "bungalov": 1.03,
@@ -153,7 +156,7 @@ def estimate_price(property_type: str, city: str, district: str, area: float,
                     condition: str, floor: str = "", balcony: str = "",
                     house_type: str = "", roof_type: str = "", amenities: str = "",
                     land_area: float = 0, land_type: str = "", utilities: str = "",
-                    access_road: str = "") -> tuple[int, int]:
+                    access_road: str = "", elevator: str = "") -> tuple[int, int]:
     city_key = city.strip().lower()
     base = CITY_PRICE_PER_M2.get(city_key, DEFAULT_PRICE_PER_M2)
 
@@ -181,8 +184,22 @@ def estimate_price(property_type: str, city: str, district: str, area: float,
     cond_mult = CONDITION_MULTIPLIER.get(condition, 1.0)
 
     floor_mult = 1.0
-    if property_type == "byt" and floor.strip() in ("0", "prízemie", "prizemie"):
-        floor_mult = GROUND_FLOOR_PENALTY
+    if property_type == "byt":
+        floor_clean = floor.strip().lower()
+        elevator_yes = elevator.strip().lower() in ("áno", "ano")
+
+        if floor_clean in ("0", "prízemie", "prizemie"):
+            floor_mult = GROUND_FLOOR_PENALTY
+        else:
+            try:
+                floor_num = int(re.sub(r"[^\d]", "", floor_clean) or -1)
+            except ValueError:
+                floor_num = -1
+            if floor_num >= HIGH_FLOOR_THRESHOLD and not elevator_yes:
+                floor_mult = NO_ELEVATOR_HIGH_FLOOR_PENALTY
+
+        if elevator_yes:
+            floor_mult *= HAS_ELEVATOR_BONUS
 
     balcony_mult = BALCONY_MULTIPLIER.get(balcony.strip().lower(), 1.0)
 
@@ -281,6 +298,8 @@ STEPS = [
      "options": ["Áno", "Nie"],
      "skip_if": lambda a: a.get("property_type") != "Pozemok"},
     {"key": "floor", "q": "Na ktorom poschodí sa byt nachádza? (napíšte 0 pre prízemie)", "type": "text",
+     "skip_if": lambda a: a.get("property_type") != "Byt"},
+    {"key": "elevator", "q": "Má bytový dom výťah?", "type": "buttons", "options": ["Áno", "Nie"],
      "skip_if": lambda a: a.get("property_type") != "Byt"},
     {"key": "condition", "q": "V akom je stave?", "type": "buttons",
      "options": ["Novostavba", "Po rekonštrukcii", "Pôvodný dobrý stav", "Potrebuje rekonštrukciu"],
@@ -387,10 +406,11 @@ def chat_message():
     land_type = answers.get("land_type", "")
     utilities = answers.get("utilities", "")
     access_road = answers.get("access_road", "")
+    elevator = answers.get("elevator", "")
 
     low, high = estimate_price(property_type, city, district, area, condition,
                                 floor, balcony, house_type, roof_type, amenities, land_area,
-                                land_type, utilities, access_road)
+                                land_type, utilities, access_road, elevator)
 
     session["estimate_low"] = low
     session["estimate_high"] = high
@@ -398,11 +418,14 @@ def chat_message():
 
     message = (
         f"Na základe zadaných údajov je orientačný odhad hodnoty vašej nehnuteľnosti "
-        f"{low:,} € – {high:,} €.\n\n"
-        f"Chcete presnejší odhad s podrobným vysvetlením? Stačí zanechať email alebo "
-        f"telefón (alebo napíšte 'preskočiť')."
+        f"{low:,} € – {high:,} €."
     ).replace(",", " ")
-    return jsonify({"message": message, "input_type": "text", "options": [], "done": False})
+    contact_prompt = (
+        "📩 Chcete presnejší odhad s podrobným vysvetlením?\n"
+        "Stačí zanechať email alebo telefón nižšie a ozveme sa vám."
+    )
+    return jsonify({"message": message, "contact_prompt": contact_prompt,
+                     "input_type": "contact", "options": ["Preskočiť"], "done": False})
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +440,7 @@ def save_lead(answers: dict, low, high) -> None:
             writer.writerow(["timestamp", "typ", "mesto", "mestska_cast", "ulica", "plocha_m2",
                               "plocha_pozemku_m2", "izby", "typ_domu", "strecha", "doplnky",
                               "typ_pozemku", "siete", "pristupova_cesta",
-                              "poschodie", "stav", "balkon_terasa", "odhad_od", "odhad_do", "kontakt"])
+                              "poschodie", "vytah", "stav", "balkon_terasa", "odhad_od", "odhad_do", "kontakt"])
         writer.writerow([
             datetime.now().isoformat(timespec="seconds"),
             answers.get("property_type", ""), answers.get("city", ""),
@@ -425,8 +448,8 @@ def save_lead(answers: dict, low, high) -> None:
             answers.get("area", ""), answers.get("land_area", ""), answers.get("rooms", ""),
             answers.get("house_type", ""), answers.get("roof_type", ""), answers.get("amenities", ""),
             answers.get("land_type", ""), answers.get("utilities", ""), answers.get("access_road", ""),
-            answers.get("floor", ""), answers.get("condition", ""), answers.get("balcony", ""),
-            low, high, answers.get(CONTACT_STEP_KEY, ""),
+            answers.get("floor", ""), answers.get("elevator", ""), answers.get("condition", ""),
+            answers.get("balcony", ""), low, high, answers.get(CONTACT_STEP_KEY, ""),
         ])
 
     send_lead_notification(answers, low, high)
@@ -532,6 +555,15 @@ CHAT_PAGE = """
     white-space:pre-wrap; }
   .bot { background:#23283a; align-self:flex-start; border-bottom-left-radius:2px; }
   .user { background:#7c9cff; color:#0f1115; align-self:flex-end; border-bottom-right-radius:2px; }
+  .contact-highlight { background:#2a2410; align-self:stretch; max-width:100%;
+    border:2px solid #f0b429; border-radius:12px; font-weight:600; color:#ffd873;
+    box-shadow:0 0 0 3px rgba(240,180,41,0.15); animation: pulse-glow 1.8s ease-in-out 1; }
+  @keyframes pulse-glow {
+    0% { box-shadow:0 0 0 0 rgba(240,180,41,0.35); }
+    60% { box-shadow:0 0 0 8px rgba(240,180,41,0); }
+    100% { box-shadow:0 0 0 3px rgba(240,180,41,0.15); }
+  }
+  .contact-hint { font-size:0.72rem; color:#9aa0ab; padding:0 12px 6px; font-weight:normal; }
   .typing { background:#23283a; align-self:flex-start; border-bottom-left-radius:2px;
     padding:10px 14px; display:flex; gap:7px; align-items:center; font-size:0.8rem; color:#9aa0ab; }
   .typing .dot { width:6px; height:6px; border-radius:50%; background:#8a8f9c;
@@ -557,6 +589,7 @@ CHAT_PAGE = """
   <div class="header">🏠 Odhad ceny nehnuteľnosti</div>
   <div class="messages" id="messages"></div>
   <div class="options" id="options"></div>
+  <div class="contact-hint" id="contactHint" style="display:none;">Napíšte email (napr. jan@priklad.sk) alebo telefón (napr. 0911 123 456)</div>
   <div class="input-row" id="inputRow">
     <input type="text" id="userInput" placeholder="Napíšte odpoveď...">
     <button onclick="send()">Poslať</button>
@@ -565,12 +598,24 @@ CHAT_PAGE = """
 <script>
 let sessionId = null;
 
-function addMsg(text, who) {
+function addMsg(text, who, extraClass) {
   const el = document.createElement('div');
-  el.className = 'msg ' + who;
+  el.className = 'msg ' + who + (extraClass ? ' ' + extraClass : '');
   el.textContent = text;
   document.getElementById('messages').appendChild(el);
   el.scrollIntoView({behavior:'smooth'});
+}
+
+function setContactMode(isContact) {
+  const hint = document.getElementById('contactHint');
+  const input = document.getElementById('userInput');
+  if (isContact) {
+    hint.style.display = 'block';
+    input.placeholder = 'jan@priklad.sk alebo 0911 123 456';
+  } else {
+    hint.style.display = 'none';
+    input.placeholder = 'Napíšte odpoveď...';
+  }
 }
 
 function showTyping() {
@@ -637,12 +682,21 @@ async function submitAnswer(answer) {
   const data = await res.json();
   hideTyping();
   addMsg(data.message, 'bot');
+  if (data.input_type === 'contact' && data.contact_prompt) {
+    addMsg(data.contact_prompt, 'bot', 'contact-highlight');
+  }
   if (data.done) {
     document.getElementById('inputRow').style.display = 'none';
+    setContactMode(false);
     renderRestartButton();
   } else if (data.input_type === 'multiselect') {
+    setContactMode(false);
     renderMultiSelect(data.options || []);
+  } else if (data.input_type === 'contact') {
+    setContactMode(true);
+    renderOptions(data.options || []);
   } else {
+    setContactMode(false);
     renderOptions(data.options || []);
   }
 }
@@ -673,6 +727,7 @@ async function start() {
   const res = await fetch('/api/chat/start', {method:'POST'});
   const data = await res.json();
   sessionId = data.session_id;
+  setContactMode(false);
   addMsg(data.message, 'bot');
   if (data.input_type === 'multiselect') {
     renderMultiSelect(data.options || []);
