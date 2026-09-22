@@ -571,7 +571,6 @@ WIDGET_JS = """
     + 'color:#e8e9ec;padding:10px 14px;border-radius:10px;font-family:sans-serif;font-size:13px;'
     + 'box-shadow:0 4px 16px rgba(0,0,0,0.25);z-index:999999;cursor:pointer;';
   document.body.appendChild(teaser);
-  setTimeout(function() { teaser.style.display = 'none'; }, 12000);
 
   var iframe = null;
   var isOpen = false;
@@ -593,6 +592,7 @@ WIDGET_JS = """
     if (iframe) { iframe.style.display = 'none'; }
     isOpen = false;
     bubble.innerHTML = '🏠';
+    teaser.style.display = 'block';
   }
 
   bubble.onclick = function() {
