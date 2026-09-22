@@ -266,10 +266,10 @@ SESSIONS: dict[str, dict] = {}  # session_id -> {"step": int, "answers": {...}}
 STEPS = [
     {"key": "property_type", "q": "Ahoj! 👋 Rád/a vám dám nezáväzný odhad ceny nehnuteľnosti. O aký typ nehnuteľnosti ide?",
      "type": "buttons", "options": ["Byt", "Dom", "Pozemok"]},
-    {"key": "city", "q": "V akom meste alebo obci sa nehnuteľnosť nachádza?", "type": "text"},
+    {"key": "city", "q": "V akom meste alebo obci sa nehnuteľnosť nachádza?", "type": "text", "confirm": True},
     {"key": "district", "q": "V ktorej mestskej časti / štvrti? (ak neviete alebo je to menšia obec bez častí, napíšte 'neviem')",
-     "type": "text"},
-    {"key": "street", "q": "Na akej ulici? (nepovinné, môžete napísať 'preskočiť')", "type": "text"},
+     "type": "text", "confirm": True},
+    {"key": "street", "q": "Na akej ulici? (nepovinné, môžete napísať 'preskočiť')", "type": "text", "confirm": True},
     {"key": "area", "q": lambda a: ("Aká je plocha pozemku (parcely) v m²?" if a.get("property_type") == "Pozemok"
                                      else "Aká je približná úžitková/zastavaná plocha v m²?"),
      "type": "number"},
@@ -329,62 +329,11 @@ def chat_start():
     return jsonify({"session_id": session_id, **format_question(first_step, {}), "done": False})
 
 
-@app.route("/api/chat/message", methods=["POST"])
-def chat_message():
-    data = request.get_json(force=True)
-    session_id = data.get("session_id")
-    user_answer = (data.get("answer") or "").strip()
-
-    session = SESSIONS.get(session_id)
-    if not session:
-        return jsonify({"error": "Relácia expirovala, obnov stránku."}), 400
-
-    answers = session["answers"]
+def next_step_or_estimate(session: dict, answers: dict, step_idx: int):
+    """Posunie rozhovor na ďalší krok, alebo ak boli zodpovedané všetky
+    otázky, vypočíta a vráti odhad ceny. Používa sa po bežnej odpovedi
+    aj po potvrdení opraviteľného poľa (mesto/mestská časť/ulica)."""
     active_steps = get_active_steps(answers)
-    step_idx = session["step"]
-
-    # --- fáza: zbieranie kontaktu (po zobrazení hrubého odhadu) ---
-    if session.get("awaiting_contact"):
-        low = session.get("estimate_low")
-        high = session.get("estimate_high")
-        if user_answer.lower() not in ("preskočiť", "preskocit", "nie", "skip", ""):
-            answers[CONTACT_STEP_KEY] = user_answer
-            summary = generate_summary(answers, low, high)
-            save_lead(answers, low, high)
-            return jsonify({
-                "message": f"Ďakujeme! 🙌\n\n{summary}\n\nOzveme sa vám čo najskôr s bezplatnou konzultáciou.",
-                "input_type": "none", "options": [], "done": True,
-            })
-        else:
-            return jsonify({
-                "message": "V poriadku, ak si to rozmyslíte, sme tu pre vás. Pekný deň! 👋",
-                "input_type": "none", "options": [], "done": True,
-            })
-
-    # --- validácia aktuálnej odpovede ---
-    current_step = active_steps[step_idx]
-    skip_words = ("preskočiť", "preskocit", "neviem", "-", "nie", "skip")
-    optional_keys = ("district", "street")
-
-    if current_step["type"] == "number":
-        cleaned = re.sub(r"[^\d.,]", "", user_answer).replace(",", ".")
-        if not cleaned:
-            return jsonify({"message": "Prosím zadajte číslo.", "input_type": "number",
-                             "options": [], "done": False})
-        answers[current_step["key"]] = float(cleaned)
-    else:
-        if not user_answer and current_step["key"] not in optional_keys:
-            return jsonify({"message": "Prosím vyberte alebo napíšte odpoveď.",
-                             "input_type": current_step["type"],
-                             "options": current_step.get("options", []), "done": False})
-        if current_step["key"] in optional_keys and user_answer.lower() in skip_words:
-            answers[current_step["key"]] = ""
-        else:
-            answers[current_step["key"]] = user_answer
-
-    # --- ďalší krok ---
-    active_steps = get_active_steps(answers)  # môže sa zmeniť po zadaní typu
-    step_idx += 1
     session["step"] = step_idx
 
     if step_idx < len(active_steps):
@@ -426,6 +375,86 @@ def chat_message():
     )
     return jsonify({"message": message, "contact_prompt": contact_prompt,
                      "input_type": "contact", "options": ["Preskočiť"], "done": False})
+
+
+@app.route("/api/chat/message", methods=["POST"])
+def chat_message():
+    data = request.get_json(force=True)
+    session_id = data.get("session_id")
+    user_answer = (data.get("answer") or "").strip()
+
+    session = SESSIONS.get(session_id)
+    if not session:
+        return jsonify({"error": "Relácia expirovala, obnov stránku."}), 400
+
+    answers = session["answers"]
+
+    # --- fáza: zbieranie kontaktu (po zobrazení hrubého odhadu) ---
+    if session.get("awaiting_contact"):
+        low = session.get("estimate_low")
+        high = session.get("estimate_high")
+        if user_answer.lower() not in ("preskočiť", "preskocit", "nie", "skip", ""):
+            answers[CONTACT_STEP_KEY] = user_answer
+            summary = generate_summary(answers, low, high)
+            save_lead(answers, low, high)
+            return jsonify({
+                "message": f"Ďakujeme! 🙌\n\n{summary}\n\nOzveme sa vám čo najskôr s bezplatnou konzultáciou.",
+                "input_type": "none", "options": [], "done": True,
+            })
+        else:
+            return jsonify({
+                "message": "V poriadku, ak si to rozmyslíte, sme tu pre vás. Pekný deň! 👋",
+                "input_type": "none", "options": [], "done": True,
+            })
+
+    # --- fáza: potvrdenie zadanej hodnoty (mesto / mestská časť / ulica) ---
+    if session.get("pending_confirm"):
+        pending = session["pending_confirm"]
+        session["pending_confirm"] = None
+        if user_answer.startswith("✅"):
+            answers[pending["key"]] = pending["value"]
+            return next_step_or_estimate(session, answers, session["step"] + 1)
+        else:
+            # Opraviť -> znova polož tú istú otázku
+            active_steps = get_active_steps(answers)
+            current_step = active_steps[session["step"]]
+            return jsonify({**format_question(current_step, answers), "done": False})
+
+    active_steps = get_active_steps(answers)
+    step_idx = session["step"]
+
+    # --- validácia aktuálnej odpovede ---
+    current_step = active_steps[step_idx]
+    skip_words = ("preskočiť", "preskocit", "neviem", "-", "nie", "skip")
+    optional_keys = ("district", "street")
+
+    if current_step["type"] == "number":
+        cleaned = re.sub(r"[^\d.,]", "", user_answer).replace(",", ".")
+        if not cleaned:
+            return jsonify({"message": "Prosím zadajte číslo.", "input_type": "number",
+                             "options": [], "done": False})
+        answers[current_step["key"]] = float(cleaned)
+    else:
+        if not user_answer and current_step["key"] not in optional_keys:
+            return jsonify({"message": "Prosím vyberte alebo napíšte odpoveď.",
+                             "input_type": current_step["type"],
+                             "options": current_step.get("options", []), "done": False})
+
+        is_skip = current_step["key"] in optional_keys and user_answer.lower() in skip_words
+        final_value = "" if is_skip else user_answer
+
+        if current_step.get("confirm") and not is_skip:
+            session["pending_confirm"] = {"key": current_step["key"], "value": final_value}
+            return jsonify({
+                "message": f'Potvrdzujem: "{final_value}" — je to správne?',
+                "input_type": "buttons",
+                "options": ["✅ Áno, pokračovať", "✏️ Opraviť"],
+                "done": False,
+            })
+
+        answers[current_step["key"]] = final_value
+
+    return next_step_or_estimate(session, answers, step_idx + 1)
 
 
 # ---------------------------------------------------------------------------
