@@ -18,27 +18,27 @@ NEPRETRŽITE na serveri (hostingu) – nie len na tvojom počítači. Na lokáln
 testovanie stačí spustiť tak ako doteraz.
 
 SPUSTENIE:
-    pip install flask anthropic --break-system-packages
+    pip install flask anthropic requests --break-system-packages
 
     export ANTHROPIC_API_KEY="tvoj-kluc"
     export ADMIN_PASSWORD="tvoje-tajne-heslo"      (pre /admin)
-    export SMTP_USER="tvoj.email@gmail.com"        (pre emailové notifikácie o leadoch)
-    export SMTP_PASSWORD="app-heslo-z-google-uctu"  (NIE bežné heslo do Gmailu, pozri nižšie)
+    export RESEND_API_KEY="re_xxxxxxxx"            (pre emailové notifikácie o leadoch)
 
     python realitny_bot.py
 
 Potom na test otvor: http://127.0.0.1:5000/demo
 (demo.html predvádza, ako widget vyzerá vložený na stránke)
 
-AKO ZÍSKAŤ "APP PASSWORD" PRE GMAIL (potrebné pre odosielanie notifikácií):
-    1. Na Gmail účte, z ktorého chceš notifikácie posielať, zapni dvojfaktorové
-       overenie (2-Step Verification) v myaccount.google.com/security
-    2. Choď na myaccount.google.com/apppasswords
-    3. Vytvor nové "app password" (heslo pre appky) - Google ti vygeneruje
-       16-znakové heslo, ktoré použiješ ako SMTP_PASSWORD (nie svoje bežné heslo!)
-    4. SMTP_USER je email tej istej schránky, cez ktorú budeš odosielať
-    Notifikácie chodia na bagona@gmail.com (dá sa zmeniť v premennej NOTIFY_EMAIL_TO).
-    Ak SMTP_USER/SMTP_PASSWORD nenastavíš, appka funguje ďalej normálne,
+AKO ZÍSKAŤ RESEND_API_KEY (potrebné pre emailové notifikácie):
+    Bezplatné hostingy (napr. Render) blokujú klasické SMTP pripojenie (Gmail
+    a pod.), preto appka posiela emaily cez službu Resend (HTTPS API, funguje
+    všade, žiadna vlastná doména netreba):
+    1. Zaregistruj sa zadarmo na resend.com (bez kreditky)
+    2. V "API Keys" vytvor nový kľúč, skopíruj ho ako RESEND_API_KEY
+    3. Notifikácie chodia na bagona@gmail.com (dá sa zmeniť v NOTIFY_EMAIL_TO)
+       a odosielajú sa z adresy onboarding@resend.dev (zdieľaná adresa Resendu -
+       funguje bez ďalšieho nastavovania, keďže neposielaš na vlastnú doménu)
+    Ak RESEND_API_KEY nenastavíš, appka funguje ďalej normálne,
     len sa neposlú emailové notifikácie (lead sa aj tak uloží do leads.csv).
 """
 
@@ -46,8 +46,7 @@ import os
 import csv
 import uuid
 import re
-import smtplib
-from email.mime.text import MIMEText
+import requests
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template_string, Response
 
@@ -56,12 +55,11 @@ app = Flask(__name__)
 LEADS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "leads.csv")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "zmen-ma")
 
-# --- Emailová notifikácia o novom leade ---
-NOTIFY_EMAIL_TO = "bagona@gmail.com"
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("SMTP_USER")          # odosielajúci účet, napr. tvoj Gmail
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")  # Gmail "App Password", nie bežné heslo!
+# --- Emailová notifikácia o novom leade (cez Resend HTTPS API - funguje aj
+# na hostingoch, ktoré blokujú klasické SMTP porty, napr. Render free tier) ---
+NOTIFY_EMAIL_TO = "mrkbgn@gmail.com"
+NOTIFY_EMAIL_FROM = "onboarding@resend.dev"  # zdieľaná adresa Resendu, funguje bez vlastnej domény
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 
 # ---------------------------------------------------------------------------
 # CENOVÁ TABUĽKA (orientačné priemery €/m2 pre byty, kraj. mestá, 2026)
@@ -492,13 +490,13 @@ def send_lead_notification_async(answers: dict, low: int, high: int) -> None:
 
 
 def send_lead_notification(answers: dict, low: int, high: int) -> None:
-    """Pošle email na NOTIFY_EMAIL_TO o novom leade. Ak nie je nastavené
-    SMTP prihlásenie, len sa to potichu preskočí (appka aj tak ďalej funguje,
-    lead ostáva uložený v leads.csv)."""
+    """Pošle email na NOTIFY_EMAIL_TO o novom leade cez Resend HTTPS API.
+    Ak nie je nastavený RESEND_API_KEY, len sa to potichu preskočí (appka
+    aj tak ďalej funguje, lead ostáva uložený v leads.csv)."""
     print("[info] send_lead_notification spustené...", flush=True)
 
-    if not SMTP_USER or not SMTP_PASSWORD:
-        print("[upozornenie] SMTP_USER/SMTP_PASSWORD nie sú nastavené - email notifikácia sa neposlala.", flush=True)
+    if not RESEND_API_KEY:
+        print("[upozornenie] RESEND_API_KEY nie je nastavený - email notifikácia sa neposlala.", flush=True)
         return
 
     body = (
@@ -514,18 +512,24 @@ def send_lead_notification(answers: dict, low: int, high: int) -> None:
         f"Odhad: {low:,} € - {high:,} €\n\n".replace(",", " ") +
         f"Kontakt: {answers.get(CONTACT_STEP_KEY, '')}\n"
     )
-
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = f"🏠 Nový lead: {answers.get('city', '')} - {low:,} - {high:,} €".replace(",", " ")
-    msg["From"] = SMTP_USER
-    msg["To"] = NOTIFY_EMAIL_TO
+    subject = f"🏠 Nový lead: {answers.get('city', '')} - {low:,} - {high:,} €".replace(",", " ")
 
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_USER, [NOTIFY_EMAIL_TO], msg.as_string())
-        print("[info] Email s notifikáciou o leade bol úspešne odoslaný.", flush=True)
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+            json={
+                "from": NOTIFY_EMAIL_FROM,
+                "to": [NOTIFY_EMAIL_TO],
+                "subject": subject,
+                "text": body,
+            },
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            print(f"[chyba] Resend API vrátilo chybu {resp.status_code}: {resp.text}", flush=True)
+        else:
+            print("[info] Email s notifikáciou o leade bol úspešne odoslaný.", flush=True)
     except Exception as e:
         print(f"[chyba] Nepodarilo sa odoslať emailovú notifikáciu: {e}", flush=True)
 
