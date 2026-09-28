@@ -35,7 +35,7 @@ AKO ZÍSKAŤ RESEND_API_KEY (potrebné pre emailové notifikácie):
     všade, žiadna vlastná doména netreba):
     1. Zaregistruj sa zadarmo na resend.com (bez kreditky)
     2. V "API Keys" vytvor nový kľúč, skopíruj ho ako RESEND_API_KEY
-    3. Notifikácie chodia na bagona@gmail.com (dá sa zmeniť v NOTIFY_EMAIL_TO)
+    3. Notifikácie chodia na info@markreal.sk a bagona@markreal.sk (dá sa zmeniť v NOTIFY_EMAIL_TO)
        a odosielajú sa z adresy onboarding@resend.dev (zdieľaná adresa Resendu -
        funguje bez ďalšieho nastavovania, keďže neposielaš na vlastnú doménu)
     Ak RESEND_API_KEY nenastavíš, appka funguje ďalej normálne,
@@ -57,9 +57,23 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "zmen-ma")
 
 # --- Emailová notifikácia o novom leade (cez Resend HTTPS API - funguje aj
 # na hostingoch, ktoré blokujú klasické SMTP porty, napr. Render free tier) ---
-NOTIFY_EMAIL_TO = "mrkbgn@gmail.com"
-NOTIFY_EMAIL_FROM = "onboarding@resend.dev"  # zdieľaná adresa Resendu, funguje bez vlastnej domény
+# Komu chodia upozornenia o nových leadoch (dá sa prepísať na Render cez premennú
+# NOTIFY_EMAIL_TO, viac adries oddeľ čiarkou).
+NOTIFY_EMAIL_TO = [e.strip() for e in os.environ.get("NOTIFY_EMAIL_TO", "info@markreal.sk,bagona@markreal.sk").split(",") if e.strip()]
+# Odosielateľ – musí byť na doméne overenej v Resende (markreal.sk). Kým doména nie je
+# overená, Resend pošle email len na adresu, pod ktorou je Resend účet.
+NOTIFY_EMAIL_FROM = os.environ.get("NOTIFY_EMAIL_FROM", "MARK REAL – cenový odhad <info@markreal.sk>")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+
+# --- Prepojenie na web MARK REAL: každý lead sa uloží aj do databázy klientov
+# (Supabase → admin webu, sekcia Klienti). Kľúč nižšie je VEREJNÝ "publishable"
+# kľúč – ten istý, ktorý používa samotný web, takže je bezpečné ho tu mať.
+# Do databázy vie len pridať nový dopyt, nič z nej prečítať.
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://xslyblbhhtwtgqjqkxvo.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "sb_publishable_t8WQ_6hACPGUE7Nz6ZSKbw_oQZgjSUp")
+# Stránka so zásadami ochrany osobných údajov (po spustení webu naostro zmeň
+# cez premennú prostredia PRIVACY_URL na https://markreal.sk/ochrana-osobnych-udajov.html)
+PRIVACY_URL = os.environ.get("PRIVACY_URL", "https://markreal.sk/novyweb/ochrana-osobnych-udajov.html")
 
 # ---------------------------------------------------------------------------
 # CENOVÁ TABUĽKA (orientačné priemery €/m2 pre byty, kraj. mestá, 2026)
@@ -242,7 +256,7 @@ def generate_summary(answers: dict, low: int, high: int) -> str:
             "krátke (3-4 vety), priateľské zhrnutie cenového odhadu v slovenčine. "
             "Spomeň rozpätie ceny a jemne pripomeň, že presnú hodnotu vie stanoviť "
             "len maklér po obhliadke, a že sa mu čoskoro ozveme.\n\n"
-            f"Údaje: {answers}\nOdhad: {low} € - {high} €"
+            f"Údaje: { {k: v for k, v in answers.items() if k != CONTACT_STEP_KEY} }\nOdhad: {low} € - {high} €"
         )
         resp = client.messages.create(
             model="claude-sonnet-4-6",
@@ -480,6 +494,81 @@ def save_lead(answers: dict, low, high) -> None:
         ])
 
     send_lead_notification_async(answers, low, high)
+    save_lead_to_supabase_async(answers, low, high)
+
+
+def describe_property(answers: dict) -> str:
+    """Krátky popis nehnuteľnosti pre kartu klienta, napr.
+    'Byt · Bratislava – Ružinov, Tomášikova · 65 m² · 3 izby · Po rekonštrukcii'."""
+    place = answers.get("city", "")
+    if answers.get("district") and answers.get("district", "").lower() not in ("neviem", "-"):
+        place += f" – {answers['district']}"
+    if answers.get("street"):
+        place += f", {answers['street']}"
+
+    def num(v):
+        try:
+            f = float(v)
+            return str(int(f)) if f.is_integer() else str(f)
+        except (TypeError, ValueError):
+            return str(v)
+
+    parts = [answers.get("property_type", ""), place]
+    if answers.get("area"):
+        parts.append(f"{num(answers['area'])} m²")
+    if answers.get("land_area"):
+        parts.append(f"pozemok {num(answers['land_area'])} m²")
+    if answers.get("rooms"):
+        parts.append(f"{num(answers['rooms'])} izby")
+    for key in ("condition", "house_type", "land_type", "floor"):
+        if answers.get(key):
+            parts.append(f"{answers[key]}. posch." if key == "floor" else str(answers[key]))
+    for key, label in (("amenities", ""), ("utilities", "siete: ")):
+        if answers.get(key):
+            parts.append(label + str(answers[key]))
+    return " · ".join(p for p in parts if p)
+
+
+def save_lead_to_supabase_async(answers: dict, low, high) -> None:
+    import threading
+    threading.Thread(target=save_lead_to_supabase, args=(answers, low, high), daemon=True).start()
+
+
+def save_lead_to_supabase(answers: dict, low, high) -> None:
+    """Uloží lead do databázy klientov na webe (sekcia Klienti v admine)
+    cez funkciu submit_lead. Ak to zlyhá, lead ostáva v leads.csv a v emaile."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    contact = str(answers.get(CONTACT_STEP_KEY, "")).strip()
+    m = re.search(r"[\w.+-]+@[\w-]+(\.[\w-]+)+", contact)
+    email = m.group(0) if m else None
+    phone = None
+    digits = re.sub(r"\D", "", contact.replace(email or "", ""))
+    if len(digits) >= 9:
+        phone = re.sub(r"[^\d+ ]", "", contact.replace(email or "", "")).strip()
+    if not email and not phone:
+        print(f"[upozornenie] Kontakt '{contact}' nie je email ani telefón – do databázy sa neuloží.", flush=True)
+        return
+    try:
+        resp = requests.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/submit_lead",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                     "Content-Type": "application/json"},
+            json={
+                "p_email": email, "p_phone": phone,
+                "p_source": "cenovy_odhad", "p_kind": "majitel",
+                "p_property": describe_property(answers),
+                "p_estimate_low": low, "p_estimate_high": high,
+                "p_message": None,
+            },
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            print(f"[chyba] Supabase vrátil {resp.status_code}: {resp.text[:300]}", flush=True)
+        else:
+            print("[info] Lead uložený do databázy klientov na webe.", flush=True)
+    except Exception as e:
+        print(f"[chyba] Nepodarilo sa uložiť lead do Supabase: {e}", flush=True)
 
 
 def send_lead_notification_async(answers: dict, low: int, high: int) -> None:
@@ -520,7 +609,8 @@ def send_lead_notification(answers: dict, low: int, high: int) -> None:
             headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
             json={
                 "from": NOTIFY_EMAIL_FROM,
-                "to": [NOTIFY_EMAIL_TO],
+                "to": NOTIFY_EMAIL_TO,
+                **({"reply_to": [m.group(0)]} if (m := re.search(r"[\w.+-]+@[\w-]+(\.[\w-]+)+", str(answers.get(CONTACT_STEP_KEY, "")))) else {}),
                 "subject": subject,
                 "text": body,
             },
@@ -670,7 +760,7 @@ CHAT_PAGE = """
   </div>
   <div class="messages" id="messages"></div>
   <div class="options" id="options"></div>
-  <div class="contact-hint" id="contactHint" style="display:none;">Napíšte email (napr. jan@priklad.sk) alebo telefón (napr. 0911 123 456)</div>
+  <div class="contact-hint" id="contactHint" style="display:none;">Napíšte email (napr. jan@priklad.sk) alebo telefón (napr. 0911 123 456).<br>Kontakt použijeme len na odhad a spätný kontakt – <a href="__PRIVACY_URL__" target="_blank" rel="noopener" style="color:#7c9cff;">ochrana osobných údajov</a>.</div>
   <div class="input-row" id="inputRow">
     <input type="text" id="userInput" placeholder="Napíšte odpoveď...">
     <button onclick="send()">Poslať</button>
@@ -827,6 +917,9 @@ start();
 </body>
 </html>
 """
+
+
+CHAT_PAGE = CHAT_PAGE.replace("__PRIVACY_URL__", PRIVACY_URL)
 
 
 @app.route("/chat")
