@@ -699,6 +699,40 @@ WIDGET_JS = """
 """
 
 
+
+# ---------------------------------------------------------------------------
+# BEZSTAVOVÉ API PRE WEB CENAREALIT.SK
+# Web posiela všetky údaje naraz a dostane rozpätie ceny (bez chatu).
+# GET slúži len na "zobudenie" servera (Render free tier po nečinnosti spí).
+# ---------------------------------------------------------------------------
+
+@app.route("/api/estimate", methods=["GET", "POST", "OPTIONS"])
+def api_estimate():
+    if request.method in ("GET", "OPTIONS"):
+        resp = jsonify({"ok": True})
+    else:
+        d = request.get_json(force=True, silent=True) or {}
+        def f(k):
+            try:
+                return float(str(d.get(k, 0) or 0).replace(",", "."))
+            except ValueError:
+                return 0.0
+        area = f("area")
+        if area <= 0 or not d.get("city"):
+            resp = jsonify({"error": "Chýba obec alebo plocha."}), 422
+            return resp
+        low, high = estimate_price(
+            str(d.get("property_type", "byt")).lower(), str(d.get("city", "")), str(d.get("district", "")),
+            area, str(d.get("condition", "pôvodný dobrý stav")).lower(), str(d.get("floor", "")),
+            str(d.get("balcony", "")), str(d.get("house_type", "")), str(d.get("roof_type", "")),
+            str(d.get("amenities", "")), f("land_area"), str(d.get("land_type", "")),
+            str(d.get("utilities", "")), str(d.get("access_road", "")), str(d.get("elevator", "")))
+        resp = jsonify({"low": low, "high": high})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return resp
+
+
 @app.route("/widget.js")
 def widget_js():
     return Response(WIDGET_JS, mimetype="application/javascript")
